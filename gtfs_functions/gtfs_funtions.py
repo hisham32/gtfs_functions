@@ -65,6 +65,12 @@ def import_gtfs(gtfs_path):
     # stop_times needs to be geodataframe if we want to do geometry operations
     stop_times = gpd.GeoDataFrame(stop_times, geometry='geometry')
 
+    # direction_id is optional, as it is not needed to determine route shapes
+    # However, if direction_id is NaN, pivot_table will return an empty DataFrame.
+    # Therefore, use a sensible default if direction id is not known.
+    # Some gtfs feeds only contain direction_id 0, use that as default
+    stop_times['direction_id'] = stop_times['direction_id'].fillna(0)
+
     return routes, stops, stop_times, trips, shapes
 
 
@@ -81,12 +87,6 @@ def cut_gtfs(stop_times, stops, shapes):
         epsg = 32700 + zone[2]
     else:
         epsg = 32600 + zone[2]
-
-    # direction_id is optional, as it is not needed to determine route shapes
-    # However, if direction_id is NaN, pivot_table will return an empty DataFrame.
-    # Therefore, use a sensible default if direction id is not known.
-    # Some gtfs feeds only contain direction_id 0, use that as default
-    stop_times['direction_id'] = stop_times['direction_id'].fillna(0)
 
     # ------------------------------------------------------------------------------
     # ------------------------------------------------------------------------------
@@ -606,7 +606,7 @@ def cut_gtfs(stop_times, stops, shapes):
 
 def speeds_from_gtfs(
         routes, stop_times, segments_gdf,
-        cutoffs = [0,6,9,15,19,22,24]):
+        cutoffs=[0, 6, 9, 15, 19, 22, 24]):
     routes = routes
     stop_times = stop_times
 
@@ -632,12 +632,6 @@ def speeds_from_gtfs(
         stop_times['runtime_h'] = first_try['runtime_h']
 
     stop_times.head(2)
-
-    # direction_id is optional, as it is not needed to determine speeds
-    # However, if direction_id is NaN, pivot_table will return an empty DataFrame.
-    # Therefore, use a sensible default if direction id is not known.
-    # Some gtfs feeds only contain direction_id 0, use that as default
-    stop_times['direction_id'] = stop_times['direction_id'].fillna(0)
 
     # Merge stop_times with segments_gdf to get the distance
     segments_gdf['direction_id'] = segments_gdf['direction_id'].map(int)
@@ -903,8 +897,6 @@ def window_creation(stop_times, cutoffs):
 
     for c in ['window', 'hour']:
         stop_times[c] = stop_times[c].astype(str)
-
-    stop_times['direction_id'] = stop_times['direction_id'].fillna(0)
 
     return stop_times
 
