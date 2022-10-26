@@ -805,6 +805,30 @@ def speeds_from_gtfs(
     return gdf
 
 
+def add_all_lines(line_frequencies, segments_gdf):
+    # Calculate sum of trips per segment with all lines
+    all_lines = line_frequencies.pivot_table(
+        ['ntrips'],
+        index=['segment_id', 'window'],
+        aggfunc='sum').reset_index()
+
+    sort_these = ['direction_id', 'window', 'stop_sequence']
+
+    data_all_lines = pd.merge(
+        all_lines,
+        segments_gdf.drop_duplicates(subset=['segment_id']),
+        left_on=['segment_id'], right_on=['segment_id'],
+        how='left').reset_index().sort_values(by=sort_these, ascending=True)
+
+    data_all_lines.drop(['index'], axis=1, inplace=True)
+    data_all_lines['route_id'] = 'ALL_LINES'
+    data_all_lines['route_name'] = 'All lines'
+    data_all_lines['direction_id'] = 'NA'
+    data_complete = line_frequencies.append(data_all_lines).reset_index()
+
+    return data_complete
+
+
 def fix_departure_time(stop_times):
     """
     Reassigns departure time to trips that start after the hour 24
@@ -1043,29 +1067,5 @@ def segments_freq(
     data_complete = data_complete[keep_these]
 
     data_complete = data_complete.loc[~data_complete.geometry.isnull()]
-
-    return data_complete
-
-
-def add_all_lines(line_frequencies, segments_gdf):
-    # Calculate sum of trips per segment with all lines
-    all_lines = line_frequencies.pivot_table(
-        ['ntrips'],
-        index=['segment_id', 'window'],
-        aggfunc='sum').reset_index()
-
-    sort_these = ['direction_id', 'window', 'stop_sequence']
-
-    data_all_lines = pd.merge(
-        all_lines,
-        segments_gdf.drop_duplicates(subset=['segment_id']),
-        left_on=['segment_id'], right_on=['segment_id'],
-        how='left').reset_index().sort_values(by=sort_these, ascending=True)
-
-    data_all_lines.drop(['index'], axis=1, inplace=True)
-    data_all_lines['route_id'] = 'ALL_LINES'
-    data_all_lines['route_name'] = 'All lines'
-    data_all_lines['direction_id'] = 'NA'
-    data_complete = line_frequencies.append(data_all_lines).reset_index()
 
     return data_complete
