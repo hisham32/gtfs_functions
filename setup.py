@@ -4,7 +4,7 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setuptools.setup(
-    name="gtfs_functions", # Replace with your own username
+    name="gtfs_functions",  # Replace with your own username
     version="2.0.0",
     author="Santiago Toso",
     author_email="santiagoa.toso@gmail.com",
