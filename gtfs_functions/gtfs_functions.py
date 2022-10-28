@@ -3,8 +3,8 @@
 Created on Fri Jul 10 15:20:33 2020
 @author: santi
 """
-import zipfile
-import os
+# import zipfile
+# import os
 import pandas as pd
 import partridge as ptg
 import geopandas as gpd
@@ -12,9 +12,10 @@ import utm
 from shapely.ops import nearest_points
 from shapely.geometry import Point, LineString, MultiLineString, MultiPoint
 from shapely.ops import split
-import math
-import re
-
+from aux_functions import (
+    add_runtime, add_distance, add_speed, fix_outliers,
+    aggregate_speed, add_all_lines_speed, add_free_flow, add_all_lines,
+    label_creation, window_creation, add_frequency, add_route_name)
 
 # os.system('apt install libspatialindex-dev')
 # os.system('pip install rtree')
@@ -606,336 +607,64 @@ def cut_gtfs(stop_times, stops, shapes):
 
 def speeds_from_gtfs(
         routes, stop_times, segments_gdf,
-        cutoffs=[0, 6, 9, 15, 19, 22, 24]):
-    routes = routes
-    stop_times = stop_times
+        cutoffs=[0, 6, 9, 15, 19, 22, 24],
+        geom=True):
 
-    # Get the runtime between stops
-    stop_times.sort_values(
-        by=['trip_id', 'stop_sequence'], ascending=True, inplace=True)
+    # Add runtime
+    stop_times = add_runtime(stop_times)
 
-    first_try = stop_times.loc[:, ['trip_id', 'arrival_time']]
-    first_try['trip_id_next'] = first_try['trip_id'].shift(-1)
-    first_try['arrival_time_next'] = first_try['arrival_time'].shift(-1)
-
-    def runtime(row):
-        if row.trip_id == row.trip_id_next:
-            runtime = (row.arrival_time_next - row.arrival_time)/3600
-        else:
-            runtime = 0
-
-        return runtime
-
-    first_try['runtime_h'] = first_try.apply(runtime, axis=1)
-
-    if len(first_try) == len(stop_times):
-        stop_times['runtime_h'] = first_try['runtime_h']
-
-    stop_times.head(2)
+    # Fix data format
+    for c in ['direction_id', 'stop_sequence']:
+        segments_gdf[c] = segments_gdf[c].astype(int)
 
     # Merge stop_times with segments_gdf to get the distance
-    segments_gdf['direction_id'] = segments_gdf['direction_id'].map(int)
-    segments_gdf['stop_sequence'] = segments_gdf['stop_sequence'].map(int)
+    speeds = add_distance(stop_times, segments_gdf)
 
-    speeds = pd.merge(stop_times, segments_gdf[['route_id', 'direction_id', 'start_stop_id', 'stop_sequence', 'segment_id','shape_id', 'distance_m']], 
-                      left_on = ['route_id', 'direction_id', 'stop_id', 'stop_sequence', 'shape_id'], 
-                      right_on = ['route_id', 'direction_id', 'start_stop_id', 'stop_sequence', 'shape_id'],
-                      how = 'left').drop('start_stop_id', axis=1)
+    # Clean df
+    keep_these = [
+        'trip_id', 'route_id', 'direction_id', 'shape_id', 'segment_id',
+        'arrival_time', 'departure_time', 'stop_id', 'stop_name',
+        'stop_sequence', 'runtime_h', 'distance_m', 'geometry']
 
-    speeds = speeds.loc[~speeds.distance_m.isnull(),
-                        ['trip_id', 'route_id', 'direction_id', 'shape_id', 'segment_id',
-                         'arrival_time', 'departure_time', 'stop_id','stop_name',
-                         'stop_sequence', 'runtime_h', 'distance_m','geometry']
-                       ]
+    speeds = speeds.loc[~speeds.distance_m.isnull(), keep_these]
 
-    # Assign a time window to each row
-    if max(cutoffs)<=24:
-        speeds_ok = speeds.loc[speeds.departure_time < 24*3600]
-        speeds_fix = speeds.loc[speeds.departure_time >= 24*3600]
-        speeds_fix['departure_time'] = [d - 24*3600 for d in speeds_fix.departure_time]
+    # Add time window and labels
+    if 'window' not in speeds.columns:
+        speeds = window_creation(speeds, cutoffs)
 
-        speeds = speeds_ok.append(speeds_fix)
-        labels = []
-        for w in cutoffs:
-            if float(w).is_integer():
-                l = str(w) + ':00'
-            else:
-                n = math.modf(w)
-                l=  str(int(n[1])) + ':' + str(int(n[0]*60))
-            labels = labels + [l]
-    else:
-        labels = []
-        for w in cutoffs:
-            if float(w).is_integer():
-                if w > 24:
-                    w1 = w-24
-                    l = str(w1) + ':00'
-                else:
-                    l = str(w) + ':00'
-                labels = labels + [l]
-            else:
-                if w > 24:
-                    w1 = w-24
-                    n = math.modf(w1)
-                    l = str(int(n[1])) + ':' + str(int(n[0]*60))
-                else:
-                    n = math.modf(w)
-                    l = str(int(n[1])) + ':' + str(int(n[0]*60))
-                labels = labels + [l]
+    # Add speeds
+    speeds = add_speed(speeds)
 
-    labels = [labels[i] + '-' + labels[i+1] for i in range(0, len(labels)-1)]
-
-    speeds['departure_time'] = speeds['departure_time']/3600
-
-    # Put each trips in the right window
-    speeds['window'] = pd.cut(speeds['departure_time'], bins=cutoffs, right=False, labels=labels)
-    speeds = speeds.loc[~speeds.window.isnull()]
-    speeds['window'] = speeds['window'].astype(str)
-
-    # Calculate the speed
-    speeds.loc[speeds.runtime_h == 0.0, 'runtime_h'] = speeds.loc[speeds.runtime_h != 0.0, 'runtime_h'].mean()
-    speeds['speed'] = round(speeds['distance_m']/1000/speeds['runtime_h'])
-    speeds = speeds.loc[~speeds.speed.isnull()]
-
-    # Calculate average speed to modify outliers
-    avg_speed_route = speeds.pivot_table('speed',
-                                         index=['route_id', 'direction_id','window'],
-                                         aggfunc='mean').reset_index()
-    avg_speed_route.rename(columns={'speed':'avg_speed_route'}, inplace=True)
     # Assign average speed to outliers
-    speeds = pd.merge(speeds, avg_speed_route, how='left')
-    speeds.loc[speeds.speed>120,'speed'] = speeds.loc[speeds.speed>120,'avg_speed_route']
+    speeds = fix_outliers(speeds)
 
-    # Calculate max speed per segment to have a free_flow reference
-    max_speed_segment = speeds.pivot_table('speed',
-                                           index = ['stop_id', 'direction_id'],
-                                           aggfunc='max')
-    max_speed_segment.rename(columns={'speed':'max_kmh'}, inplace=True)
+    # Add free flow speed and average
+    data = aggregate_speed(speeds, segments_gdf)
 
+    # Add route name
+    data = add_route_name(data, routes)
 
-    # Get the average per route, direction, segment and time of day
-    speeds_agg = speeds.pivot_table(['speed', 'runtime_h', 'avg_speed_route'],
-                                    index=['route_id', 'direction_id', 'segment_id', 'window'],
-                                    aggfunc='mean'
-                                   ).reset_index()
-    speeds_agg['route_id'] = speeds_agg['route_id'].map(str)
-    speeds_agg['direction_id'] = speeds_agg['direction_id'].map(int)
+    # Add averages for all lines
+    data_complete = add_all_lines_speed(data, speeds, segments_gdf)
 
-    data = pd.merge(speeds_agg, segments_gdf, 
-            left_on=['route_id', 'direction_id', 'segment_id'],
-            right_on = ['route_id', 'direction_id', 'segment_id'],
-            how='left').reset_index().sort_values(by = ['route_id', 'direction_id','window','stop_sequence',], ascending=True)
+    # Add free flow speed
+    data_complete = add_free_flow(speeds, data_complete)
 
-    data.drop(['index'], axis=1, inplace=True)
-
-    # Route name
-    routes['route_name'] = ''
-    if routes.route_short_name.isnull().unique()[0]:
-        routes['route_name'] = routes.route_long_name
-    elif routes.route_long_name.isnull().unique()[0]:
-        routes['route_name'] = routes.route_short_name
+    # Convert to a GeoDataFrame is applicable
+    if geom is True:
+        data_complete = gpd.GeoDataFrame(
+            data=data_complete.drop('geometry', axis=1),
+            geometry=data_complete.geometry)
     else:
-        routes['route_name'] = routes.route_short_name + ' ' + routes.route_long_name
-    data = pd.merge(data, routes[['route_id', 'route_name']], left_on='route_id', right_on='route_id', how='left')
+        data_complete.drop('geometry', axis=1, inplace=True)
 
-    # Get the average per segment and time of day
-    # Then add it to the rest of the data
+    data_complete.rename(columns={'speed': 'speed_kmh'}, inplace=True)
+    data_complete['speed_mph'] = data_complete['speed_kmh']*0.621371
+    data_complete['max_mph'] = data_complete['max_kmh']*0.621371
 
-    all_lines = speeds.pivot_table(['speed', 'runtime_h', 'avg_speed_route'],
-                                    index=['segment_id', 'window'],
-                                    aggfunc = 'mean'
-                                   ).reset_index()
-
-    data_all_lines = pd.merge(
-        all_lines,
-        segments_gdf.drop_duplicates(subset=['segment_id']),
-        left_on=['segment_id'],
-        right_on = ['segment_id'],
-        how='left').reset_index().sort_values(by = ['direction_id','window','stop_sequence'], ascending=True)
-
-    data_all_lines.drop(['index'], axis=1, inplace=True)
-    data_all_lines['route_id'] = 'ALL_LINES'
-    data_all_lines['route_name'] = 'All lines'
-    data_all_lines['direction_id'] = 'NA'
-    data_complete = data.append(data_all_lines)
-
-    data_complete1 = data_complete.loc[~data_complete.route_name.isnull(), :].reset_index()
-
-    # Get the columns in the right format
-    int_columns = ['speed']
-
-    for c in int_columns:
-        data_complete1[c] = data_complete1[c].apply(lambda x: round(x, 1))
-
-    data_complete1 = data_complete1.loc[:,['route_id', 'route_name','direction_id','segment_id', 'window',
-                                           'speed', 
-                                           'start_stop_id', 'start_stop_name', 'end_stop_id','end_stop_name', 
-                                           'distance_m','stop_sequence', 'shape_id', 'runtime_h','geometry', ]]       
-
-    data_complete1.columns = [
-        'route_id', 'route_name', 'dir_id', 'segment_id', 'window', 'speed',
-        's_st_id', 's_st_name', 'e_st_id', 'e_st_name',
-        'distance_m', 'stop_seq', 'shape_id', 'runtime_h', 'geometry']
-
-    # Assign max speeds to each segment
-    data_complete1 = pd.merge(
-        data_complete1, max_speed_segment,
-        left_on=['s_st_id', 'dir_id'], right_on=['stop_id', 'direction_id'],
-        how='left')
-
-    gdf = gpd.GeoDataFrame(
-        data=data_complete1.drop('geometry', axis=1),
-        geometry=data_complete1.geometry)
-
-    gdf.loc[gdf.dir_id == 0, 'dir_id'] = 'Inbound'
-    gdf.loc[gdf.dir_id == 1, 'dir_id'] = 'Outbound'
-
-    gdf.rename(columns={'speed': 'speed_kmh'}, inplace=True)
-    gdf['speed_mph'] = gdf['speed_kmh']*0.621371
-    gdf['max_mph'] = gdf['max_kmh']*0.621371
-
-    gdf = gdf.drop(['shape_id'], axis=1).drop_duplicates()
-
-    return gdf
-
-
-def add_all_lines(line_frequencies, segments_gdf):
-    # Calculate sum of trips per segment with all lines
-    all_lines = line_frequencies.pivot_table(
-        ['ntrips'],
-        index=['segment_id', 'window'],
-        aggfunc='sum').reset_index()
-
-    sort_these = ['direction_id', 'window', 'stop_sequence']
-
-    data_all_lines = pd.merge(
-        all_lines,
-        segments_gdf.drop_duplicates(subset=['segment_id']),
-        left_on=['segment_id'], right_on=['segment_id'],
-        how='left').reset_index().sort_values(by=sort_these, ascending=True)
-
-    data_all_lines.drop(['index'], axis=1, inplace=True)
-    data_all_lines['route_id'] = 'ALL_LINES'
-    data_all_lines['route_name'] = 'All lines'
-    data_all_lines['direction_id'] = 'NA'
-    data_complete = line_frequencies.append(data_all_lines).reset_index()
+    data_complete = data_complete.drop(['shape_id'], axis=1).drop_duplicates()
 
     return data_complete
-
-
-def fix_departure_time(stop_times):
-    """
-    Reassigns departure time to trips that start after the hour 24
-    """
-    stop_times_ok = stop_times.loc[stop_times.departure_time < 24*3600]
-    stop_times_fix = stop_times.loc[stop_times.departure_time >= 24*3600]
-    stop_times_fix['departure_time'] = [
-        d - 24*3600 for d in stop_times_fix.departure_time]
-
-    stop_times = stop_times_ok.append(stop_times_fix)
-
-    return stop_times
-
-
-def label_creation(cutoffs):
-    labels = []
-    if max(cutoffs) <= 24:
-        for w in cutoffs:
-            if float(w).is_integer():
-                label = str(w) + ':00'
-            else:
-                n = math.modf(w)
-                label = str(int(n[1])) + ':' + str(int(n[0]*60))
-            labels.append(label)
-    else:
-        labels = []
-        for w in cutoffs:
-            if float(w).is_integer():
-                if w > 24:
-                    w1 = w-24
-                    label = str(w1) + ':00'
-                else:
-                    label = str(w) + ':00'
-                labels.append(label)
-            else:
-                if w > 24:
-                    w1 = w-24
-                    n = math.modf(w1)
-                    label = str(int(n[1])) + ':' + str(int(n[0]*60))
-                else:
-                    n = math.modf(w)
-                    label = str(int(n[1])) + ':' + str(int(n[0]*60))
-                labels.append(label)
-
-    labels = [labels[i] + '-' + labels[i+1] for i in range(0, len(labels)-1)]
-
-    return labels
-
-
-def window_creation(stop_times, cutoffs):
-    "Adds the time time window and labels to stop_times"
-    hours = list(range(25))
-    hours_labels = [str(hours[i]) + ':00' for i in range(len(hours)-1)]
-
-    # Create the labels for the cutoffs
-    if max(cutoffs) <= 24:
-        stop_times = fix_departure_time(stop_times)
-
-    labels = label_creation(cutoffs)
-
-    # Get departure time as hour and a fraction
-    departure_time = stop_times['departure_time']/3600
-
-    # Put each trip in the right window
-    stop_times['window'] = pd.cut(
-        departure_time, bins=cutoffs, right=False, labels=labels)
-    stop_times = stop_times.loc[~stop_times.window.isnull()]
-
-    # Put each trip in the right hour
-    stop_times['hour'] = pd.cut(
-        departure_time, bins=hours, right=False, labels=hours_labels)
-
-    for c in ['window', 'hour']:
-        stop_times[c] = stop_times[c].astype(str)
-
-    return stop_times
-
-
-def aggregate_by(
-        stop_times, labels, index_='stop_id', col='window',
-        cutoffs=[0, 6, 9, 15, 19, 22, 24]):
-    # Some gtfs feeds only contain direction_id 0, use that as default
-    trips_agg = stop_times.pivot_table(
-        'trip_id', index=[index_, 'direction_id', col],
-        aggfunc='count').reset_index()
-
-    # direction_id is optional, as it is not needed to determine trip frequencies
-    # However, if direction_id is NaN, pivot_table will return an empty DataFrame.
-    # Therefore, use a sensible default if direction id is not known.
-    # Some gtfs feeds only contain direction_id 0, use that as default
-    trips_agg.rename(columns={'trip_id': 'ntrips'}, inplace=True)
-    start_time = trips_agg.window.apply(lambda x: cutoffs[labels.index(x)])
-    end_time = trips_agg.window.apply(lambda x: cutoffs[labels.index(x) + 1])
-
-    trips_agg['frequency'] = ((end_time - start_time)*60 / trips_agg.ntrips)\
-        .astype(int)
-
-
-def add_route_name(line_frequencies, routes):
-    # Add the route name
-    routes['route_name'] = ''
-    if routes.route_short_name.isnull().unique()[0]:
-        routes['route_name'] = routes.route_long_name
-    elif routes.route_long_name.isnull().unique()[0]:
-        routes['route_name'] = routes.route_short_name
-    else:
-        routes['route_name'] =\
-            routes.route_short_name + ' ' + routes.route_long_name
-
-    line_frequencies = pd.merge(
-        line_frequencies, routes[['route_id', 'route_name']])
-
-    return line_frequencies
 
 
 def stops_freq(
@@ -947,7 +676,7 @@ def stops_freq(
         stop_times = window_creation(stop_times, cutoffs)
 
     labels = label_creation(cutoffs)
-    stop_frequencies = aggregate_by(
+    stop_frequencies = add_frequency(
         stop_times, labels, index_='stop_id',
         col='window', cutoffs=cutoffs)
 
@@ -974,11 +703,15 @@ def lines_freq(
 
     stop_times_first = stop_times.loc[stop_times.stop_sequence == 1, :]
 
+    # Create time windows
     if 'window' not in stop_times.columns:
         stop_times_first = window_creation(stop_times_first, cutoffs)
 
+    # Create labels
     labels = label_creation(cutoffs)
-    line_frequencies = aggregate_by(
+
+    # Get frequencies
+    line_frequencies = add_frequency(
         stop_times, labels, index_=['route_id', 'shape_id'],
         col='window', cutoffs=cutoffs)
 
@@ -1015,7 +748,7 @@ def segments_freq(
     labels = label_creation(cutoffs)
 
     # Aggregate trips
-    line_frequencies = aggregate_by(
+    line_frequencies = add_frequency(
         stop_times, labels, index_=['route_id', 'stop_id'],
         col='window', cutoffs=cutoffs)
 
