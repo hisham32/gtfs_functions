@@ -345,7 +345,7 @@ def cut_gtfs(stop_times, stops, shapes):
                     cut_points = MultiPoint(cut_points[1:-1])
                     result = split(line, cut_points)
 
-                if len(result)==len(trans_lines_all)-1:
+                if len(result.geoms)==len(trans_lines_all.geoms)-1:
                     d['segment'] = [s for s in result]
 
                     return d
