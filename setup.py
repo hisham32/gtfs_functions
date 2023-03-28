@@ -11,7 +11,7 @@ setuptools.setup(
     description="Package specifically designed to speed up some frequent GTFS spatial analyses like mapping frequncies and speeds.",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/Bondify/gtfs_functions",
+    url="https://github.com/hisham32/gtfs_functions",
     packages=setuptools.find_packages(),
     classifiers=[
         "Programming Language :: Python :: 3",
