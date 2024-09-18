@@ -481,7 +481,7 @@ def cut_gtfs(stop_times, stops, shapes):
 
         # Check where stops are closer than points of the track
         # To do that we intersect each segment between two segments of the track with our cut lines
-        how_many = gpd.sjoin(track_l_gdf, cut_gdf, how='left', op='intersects', lsuffix='left', rsuffix='right').reset_index()
+        how_many = gpd.sjoin(track_l_gdf, cut_gdf, how='left', predicate='intersects', lsuffix='left', rsuffix='right').reset_index()
         how_many.rename(columns=dict(index='index_track_', index_right = 'index_cut'), inplace=True)
 
         # The filter those that were intersected by more than one cut line
